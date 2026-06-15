@@ -1721,22 +1721,37 @@ int main(void) {
         jbe_handle_key(&e, JAPI_KEY_CTRL('J'));
         CHECK(e.commander_active, "Ctrl+J opens the Commander");
 
-        /* F7 = new folder: prompt, type a name, Enter creates it on A:. */
-        jbe_handle_key(&e, JAPI_KEY_F7);
+        /* Ctrl+N = new folder: prompt, type a name, Enter creates it on A:. */
+        jbe_handle_key(&e, JAPI_KEY_CTRL('N'));
         CHECK(e.commander_input_active && e.commander_input_kind == 0,
-              "F7 opens the new-folder prompt");
+              "Ctrl+N opens the new-folder prompt");
         const char *nm = "tdir";
         for (int i = 0; nm[i]; i++) jbe_handle_key(&e, (uint16_t)nm[i]);
         CHECK(e.commander_input_len == 4, "typed the folder name");
         jbe_handle_key(&e, JAPI_KEY_ENTER);
         CHECK(!e.commander_input_active, "Enter closes the prompt");
-        { japi_dir_t d; CHECK(japi_opendir(&d, "A:tdir"), "F7 created the folder"); }
+        { japi_dir_t d; CHECK(japi_opendir(&d, "A:tdir"), "Ctrl+N created the folder"); }
 
         /* Esc cancels the prompt without acting. */
-        jbe_handle_key(&e, JAPI_KEY_F7);
+        jbe_handle_key(&e, JAPI_KEY_CTRL('N'));
         jbe_handle_key(&e, 'z');
         jbe_handle_key(&e, JAPI_KEY_ESCAPE);
         CHECK(!e.commander_input_active, "Esc cancels the prompt");
+
+        /* Delete an (empty) folder: put the cursor on tdir, Delete, confirm with
+           Y. japi_remove drops empty dirs, so the folder must be gone after. */
+        {
+            ui_filelist_t *ap = &e.commander_list[0];
+            for (int g = 0; g < ap->n_entries &&
+                 strcmp(ap->entries[ap->sel].name, "tdir") != 0; g++)
+                jbe_handle_key(&e, JAPI_KEY_DOWN);
+            CHECK(strcmp(ap->entries[ap->sel].name, "tdir") == 0 &&
+                  ap->entries[ap->sel].is_dir, "cursor on the tdir folder");
+            jbe_handle_key(&e, JAPI_KEY_DELETE);
+            CHECK(e.commander_confirm_delete, "Delete on a folder asks to confirm");
+            jbe_handle_key(&e, 'Y');
+            { japi_dir_t d; CHECK(!japi_opendir(&d, "A:tdir"), "Y removed the empty folder"); }
+        }
 
         /* Windows-style copy: select cz.txt in A:, Ctrl+C, Tab to C:, Ctrl+V. */
         ui_filelist_t *a = &e.commander_list[0];

@@ -3750,11 +3750,18 @@ static const ui_filelist_entry_t *cmd_pick_file(jbe_state_t *s, const char *verb
 }
 
 /* The files to act on: every tagged file, or the current one if none are
-   tagged. Folders and ".." are skipped. Returns the count. Pass names == NULL
-   to count only -- this avoids forcing the caller to reserve a names buffer
-   (2 KB) on the RP2350 core-0 stack just to find out how many files match. */
+   tagged. ".." is always skipped. Returns the count. Pass names == NULL to
+   count only -- this avoids forcing the caller to reserve a names buffer
+   (2 KB) on the RP2350 core-0 stack just to find out how many files match.
+
+   with_dirs lets the single-current-entry case also pick a folder, which is
+   what Delete wants (japi_remove drops an empty directory just fine). Copy/cut
+   pass false because cmd_copy_file only knows how to stream file bytes. Tagged
+   entries are always files -- commander_tag refuses to tag a folder -- so the
+   tagged loop needs no dir handling either way. */
 static int commander_collect(jbe_state_t *s,
-                             char names[][UI_FILELIST_NAME_MAX + 1], int max) {
+                             char names[][UI_FILELIST_NAME_MAX + 1], int max,
+                             bool with_dirs) {
     ui_filelist_t *a = &s->commander_list[s->commander_pane];
     int n = 0, any = 0;
     for (int i = 0; i < a->n_entries; i++) if (a->entries[i].tagged) any = 1;
@@ -3764,7 +3771,9 @@ static int commander_collect(jbe_state_t *s,
                 if (names) snprintf(names[n], UI_FILELIST_NAME_MAX + 1, "%s", a->entries[i].name);
                 n++;
             }
-    } else if (a->n_entries > 0 && !a->entries[a->sel].is_dir) {
+    } else if (a->n_entries > 0
+               && strcmp(a->entries[a->sel].name, "..") != 0
+               && (with_dirs || !a->entries[a->sel].is_dir)) {
         if (names) snprintf(names[n], UI_FILELIST_NAME_MAX + 1, "%s", a->entries[a->sel].name);
         n++;
     }
@@ -3774,7 +3783,7 @@ static int commander_collect(jbe_state_t *s,
 /* Ctrl+C / Ctrl+X: snapshot the tagged-or-current files onto the clipboard. */
 static void commander_clip(jbe_state_t *s, bool cut) {
     ui_filelist_t *a = &s->commander_list[s->commander_pane];
-    s->clip_n = commander_collect(s, s->clip_names, JBE_CLIP_MAX);
+    s->clip_n = commander_collect(s, s->clip_names, JBE_CLIP_MAX, false);
     if (s->clip_n == 0) {
         snprintf(s->commander_msg, sizeof s->commander_msg,
                  "Nothing to %s (pick a file)", cut ? "cut" : "copy");
@@ -3813,7 +3822,7 @@ static void commander_delete(jbe_state_t *s) {
        core-0 stack (~2 KB) and hang the machine. The Commander is modal and
        runs only on core 0, so a single shared buffer is safe. */
     static char names[JBE_CLIP_MAX][UI_FILELIST_NAME_MAX + 1];
-    int n = commander_collect(s, names, JBE_CLIP_MAX);
+    int n = commander_collect(s, names, JBE_CLIP_MAX, true);
     ui_filelist_t *a = &s->commander_list[s->commander_pane];
     int ok = 0;
     for (int i = 0; i < n; i++) {
@@ -3821,8 +3830,14 @@ static void commander_delete(jbe_state_t *s) {
         if (japi_remove(path)) ok++;
     }
     cmd_reload(a);
-    snprintf(s->commander_msg, sizeof s->commander_msg,
-             "Deleted %d item%s", ok, ok == 1 ? "" : "s");
+    if (ok == n)
+        snprintf(s->commander_msg, sizeof s->commander_msg,
+                 "Deleted %d item%s", ok, ok == 1 ? "" : "s");
+    else
+        /* The usual reason a remove fails is a non-empty folder: lfs_remove /
+           f_unlink only drop empty directories. */
+        snprintf(s->commander_msg, sizeof s->commander_msg,
+                 "Deleted %d of %d -- a folder must be empty first", ok, n);
 }
 
 /* Space: toggle the tag on the current file, then step down. Shift+Up/Down
@@ -3838,7 +3853,7 @@ static void commander_tag_set(ui_filelist_t *a, int idx) {
         a->entries[idx].tagged = true;
 }
 
-/* F7 (after the name prompt): create a folder in the active pane. */
+/* Ctrl+N (after the name prompt): create a folder in the active pane. */
 static void commander_do_mkdir(jbe_state_t *s, const char *name) {
     ui_filelist_t *a = &s->commander_list[s->commander_pane];
     char path[200]; cmd_join(path, sizeof path, a->cwd, name);
@@ -3848,7 +3863,7 @@ static void commander_do_mkdir(jbe_state_t *s, const char *name) {
              ok ? "Created folder %s" : "Could not create %s", name);
 }
 
-/* F2 (after the name prompt): rename the selected file. The platform has no
+/* Ctrl+R (after the name prompt): rename the selected file. The platform has no
    rename, so copy to the new name in the same folder, then remove the old. */
 static void commander_do_rename(jbe_state_t *s, const char *newname) {
     const ui_filelist_entry_t *e = cmd_pick_file(s, "rename");
@@ -3926,16 +3941,16 @@ static void commander_handle_key(jbe_state_t *s, uint16_t k) {
     if (k == JAPI_KEY_CTRL('C')) { commander_clip(s, false); return; }   /* copy  */
     if (k == JAPI_KEY_CTRL('X')) { commander_clip(s, true);  return; }   /* cut   */
     if (k == JAPI_KEY_CTRL('V')) { commander_paste(s);       return; }   /* paste */
-    if (k == JAPI_KEY_F2) {                                              /* rename */
+    if (k == JAPI_KEY_CTRL('R')) {                                       /* rename */
         const ui_filelist_entry_t *e = cmd_pick_file(s, "rename");
         if (e) commander_prompt(s, 1, e->name);
         return;
     }
-    if (k == JAPI_KEY_F7) { commander_prompt(s, 0, ""); return; }        /* new folder */
+    if (k == JAPI_KEY_CTRL('N')) { commander_prompt(s, 0, ""); return; } /* new folder */
     if (k == JAPI_KEY_DELETE) {                                          /* delete (confirm) */
         /* Count only (NULL names) -- no need to reserve a 2 KB names buffer on
            the core-0 stack just to decide whether to raise the prompt. */
-        if (commander_collect(s, NULL, JBE_CLIP_MAX) > 0)
+        if (commander_collect(s, NULL, JBE_CLIP_MAX, true) > 0)
             { s->commander_confirm_delete = true; s->commander_msg[0] = 0; }
         return;
     }
@@ -4003,7 +4018,7 @@ static void render_commander(jbe_state_t *s) {
     jfc_clear_row(JFC_LEG1_ROW, VGA_WHITE, BG);
     jfc_clear_row(JFC_LEG2_ROW, VGA_WHITE, BG);
     static const char *const LEG_KEYS[] =
-        { "Ctrl+C", "Ctrl+X", "Ctrl+V", "Del", "F2", "F7",
+        { "Ctrl+C", "Ctrl+X", "Ctrl+V", "Del", "Ctrl+R", "Ctrl+N",
           "Space", "Tab", "Ctrl+Tab", "Esc" };
     static const char *const LEG_ACTS[] =
         { "Copy", "Cut", "Paste", "Delete", "Rename", "New folder",
