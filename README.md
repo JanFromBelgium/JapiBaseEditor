@@ -9,9 +9,9 @@ keyboard.
 
 ![Japi Base Editor — the Edit menu over a graphics program](images/editmenu.png)
 
-**This is v1.0, the first version.** It runs on real Japi Base hardware over
-VGA + PS/2. A second version with a built-in contextual help system is on
-the way. See [Versioning](#versioning) for what the `1` means.
+**This is v1.1, a development release.** It runs on real Japi Base hardware over
+VGA + PS/2. It graduates to v2.0 once the Japi Commander is fully built out. See
+[Versioning](#versioning) for what the version number means.
 
 ## The hardware
 
@@ -94,6 +94,9 @@ Japi Base Computer (editor + BASIC) is a separate firmware.
   swap focus between panes and move the divider.
 - **Full CP437 character entry** — accented letters, box-drawing glyphs and
   symbols, so layouts like French AZERTY type correctly.
+- **Built-in help** — a **Help** menu and **F1** open the manual right inside the
+  editor, in a window that floats over your work. F1 in a menu jumps straight to
+  that menu's section, or to the highlighted item.
 
 ### Keyboard
 
@@ -165,9 +168,8 @@ current program, but that interpreter is developed on its own track.
 
 ## What is coming
 
-- **A built-in contextual help system** — open straight to the page or item
-  you have selected. This is the headline feature of the next version.
-- **More Japi Commander** — move, delete, rename, make-directory.
+- **A more capable Japi Commander** — move, delete, rename, make-directory.
+  This is what graduates the editor to v2.0.
 - More syntax schemes and editor polish.
 
 ## Versioning
@@ -183,10 +185,10 @@ experimental:
   yet production-stable. When it stabilises it graduates to the next even
   production version.
 
-**This is v1.0 — an odd, development release.** It runs on real hardware and is
-yours to try, but it is a first version, not a production-stable one. The
-built-in contextual help system and a more capable Japi Commander are still to
-come; when the editor settles it will graduate to v2.0.
+**This is v1.1 — an odd, development release.** It runs on real hardware and is
+yours to try, but it is not production-stable yet. A more capable Japi Commander
+is still to come; when that lands and the editor settles it will graduate to
+v2.0.
 
 ## License
 
