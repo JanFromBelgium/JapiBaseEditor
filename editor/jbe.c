@@ -3995,10 +3995,10 @@ static void render_commander(jbe_state_t *s) {
     jfc_clear_row(JFC_LEG2_ROW, VGA_WHITE, BG);
     static const char *const LEG_KEYS[] =
         { "Ctrl+C", "Ctrl+X", "Ctrl+V", "Del", "F2", "F7",
-          "Space", "Tab", "^Tab", "Esc" };
+          "Space", "Tab", "Ctrl+Tab", "Esc" };
     static const char *const LEG_ACTS[] =
         { "Copy", "Cut", "Paste", "Delete", "Rename", "New folder",
-          "Select", "Pane", "Drive", "Close" };
+          "Select", "Switch pane", "Switch drive", "Close" };
     const int NLEG = (int)(sizeof LEG_KEYS / sizeof LEG_KEYS[0]);
     int sumw = 0;
     for (int i = 0; i < NLEG; i++) {
