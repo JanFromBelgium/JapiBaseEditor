@@ -8,6 +8,14 @@
 #include "japi_base.h"
 #include "japi_sim.h"
 #include "jbe.h"
+#include "help_text.h"   /* HELP_ANCHORS[], to assert F1 jumps to the right line */
+
+/* Line number of a help anchor, or -1. Mirrors help_anchor_line() in jbe.c. */
+static int help_anchor(const char *id) {
+    for (int i = 0; HELP_ANCHORS[i].id; i++)
+        if (strcmp(HELP_ANCHORS[i].id, id) == 0) return HELP_ANCHORS[i].line;
+    return -1;
+}
 
 static int fails = 0;
 #define CHECK(c, msg) do { if (!(c)) { printf("FAIL: %s\n", msg); fails++; } } while (0)
@@ -1654,7 +1662,47 @@ int main(void) {
         jbe_free(&s);
     }
 
-    if (fails == 0) { printf("PASS: JBE MVP step 1..5c + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 (shortcuts+macro-menu) + tab-indent + file(saveas/close/delete)\n"); return 0; }
+    /* ----- step 21: F1 context-sensitive help ----------------------------- */
+    {
+        jbe_state_t e;
+        jbe_init(&e);
+        CHECK(make_fixture("A:jbe_h.txt", "one\n"), "write help fixture");
+        CHECK(jbe_load(&e, "A:jbe_h.txt"), "load help fixture");
+
+        /* F1 while editing opens the help at the top; Esc closes it. */
+        jbe_handle_key(&e, JAPI_KEY_F1);
+        CHECK(e.help_active && e.help_top == 0, "F1 (editing) opens help at top");
+        jbe_handle_key(&e, JAPI_KEY_ESCAPE);
+        CHECK(!e.help_active, "Esc closes help");
+
+        /* F1 with the Edit menu open, highlighted on Cut (item 0), jumps to Cut. */
+        jbe_handle_key(&e, JAPI_KEY_ALT('E'));
+        CHECK(e.menu_active && e.menu_idx == 1, "Alt+E opens Edit menu");
+        jbe_handle_key(&e, JAPI_KEY_F1);
+        CHECK(e.help_active && e.help_top == help_anchor("item:Edit/Cut"),
+              "F1 on Cut -> Cut help");
+        jbe_handle_key(&e, JAPI_KEY_ESCAPE);
+
+        /* Move down to Select All (Cut,Copy,Paste,Select All = index 3) -> its help. */
+        jbe_handle_key(&e, JAPI_KEY_ALT('E'));
+        jbe_handle_key(&e, JAPI_KEY_DOWN);
+        jbe_handle_key(&e, JAPI_KEY_DOWN);
+        jbe_handle_key(&e, JAPI_KEY_DOWN);
+        jbe_handle_key(&e, JAPI_KEY_F1);
+        CHECK(e.help_active && e.help_top == help_anchor("item:Edit/Select All"),
+              "F1 on Select All -> its help");
+        jbe_handle_key(&e, JAPI_KEY_ESCAPE);
+
+        /* Scroll: PgDn moves down, Home returns to the top. */
+        jbe_handle_key(&e, JAPI_KEY_F1);
+        jbe_handle_key(&e, JAPI_KEY_PGDN);
+        CHECK(e.help_active && e.help_top > 0, "PgDn scrolls help down");
+        jbe_handle_key(&e, JAPI_KEY_HOME);
+        CHECK(e.help_top == 0, "Home returns to top");
+        jbe_handle_key(&e, JAPI_KEY_ESCAPE);
+    }
+
+    if (fails == 0) { printf("PASS: JBE MVP step 1..5c + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 (shortcuts+macro-menu) + tab-indent + file(saveas/close/delete) + 21 (F1 help)\n"); return 0; }
     printf("%d check(s) failed\n", fails);
     return 1;
 }

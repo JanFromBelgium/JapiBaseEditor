@@ -11,6 +11,8 @@
 #include <string.h>
 #include <stdio.h>
 #include "jbe.h"
+#include "help_text.h"   /* generated from JBE_MANUAL.md by tools/mkhelp.py:
+                            HELP_LINES[], HELP_NLINES, HELP_ANCHORS[] */
 
 #define JBE_BG          VGA_DARK_BLUE
 #define JBE_FG          VGA_WHITE
@@ -1456,6 +1458,72 @@ static void menu_open(jbe_state_t *s, int m) {
 }
 static void menu_close(jbe_state_t *s) { s->menu_active = false; }
 
+/* ---- F1 Help helpers (the viewer render_help lives near jbe_render) -------
+   Content + the id->line anchor table come from help_text.h. */
+#define HELP_VIS_ROWS 48          /* visible content rows in the 52-tall window */
+
+/* Map a help id ("menu:File", "item:Edit/Select All") to a line, or -1. */
+static int help_anchor_line(const char *id) {
+    if (!id) return -1;
+    for (int i = 0; HELP_ANCHORS[i].id; i++)
+        if (strcmp(HELP_ANCHORS[i].id, id) == 0) return HELP_ANCHORS[i].line;
+    return -1;
+}
+
+/* Largest valid scroll offset so the final page is fully shown. */
+static int help_max_top(void) {
+    int m = HELP_NLINES - HELP_VIS_ROWS;
+    return m < 0 ? 0 : m;
+}
+
+/* Open the help window scrolled to `id` (NULL or unknown -> the top). */
+static void help_open(jbe_state_t *s, const char *id) {
+    int line = help_anchor_line(id);
+    if (line < 0) line = 0;
+    if (line > help_max_top()) line = help_max_top();
+    s->help_active = true;
+    s->help_top    = line;
+}
+
+/* F1 from the editor or an open menu: jump to the matching help section. The
+   label normalisation (drop a trailing "...") mirrors tools/mkhelp.py so the
+   ids match; an item with no anchor falls back to its menu's section. */
+static void help_open_context(jbe_state_t *s) {
+    if (!s->menu_active) { help_open(s, NULL); return; }
+    const char *title = JBE_MENU_TITLES[s->menu_idx];
+    const menu_item_t *it = &menu_items_for(s, s->menu_idx)[s->item_idx];
+    char id[96];
+    if (it->label && !menu_item_is_sep(it)) {
+        char lab[48];
+        snprintf(lab, sizeof lab, "%s", it->label);
+        int n = (int)strlen(lab);
+        while (n >= 3 && lab[n-1]=='.' && lab[n-2]=='.' && lab[n-3]=='.') { n -= 3; lab[n] = 0; }
+        while (n > 0 && lab[n-1] == ' ') lab[--n] = 0;
+        snprintf(id, sizeof id, "item:%s/%s", title, lab);
+        if (help_anchor_line(id) >= 0) { help_open(s, id); return; }
+    }
+    snprintf(id, sizeof id, "menu:%s", title);
+    help_open(s, id);
+}
+
+/* Keys while the help window is open (fully modal). */
+static void help_handle_key(jbe_state_t *s, uint16_t k) {
+    int maxt = help_max_top();
+    switch (k) {
+        case JAPI_KEY_UP:    s->help_top -= 1;             break;
+        case JAPI_KEY_DOWN:  s->help_top += 1;             break;
+        case JAPI_KEY_PGUP:  s->help_top -= HELP_VIS_ROWS; break;
+        case JAPI_KEY_PGDN:  s->help_top += HELP_VIS_ROWS; break;
+        case JAPI_KEY_HOME:  s->help_top  = 0;             break;
+        case JAPI_KEY_END:   s->help_top  = maxt;          break;
+        case JAPI_KEY_ESCAPE:
+        case JAPI_KEY_F1:    s->help_active = false;       return;
+        default:                                           return;
+    }
+    if (s->help_top < 0)    s->help_top = 0;
+    if (s->help_top > maxt) s->help_top = maxt;
+}
+
 /* --- Find (step 8a) -------------------------------------------------- */
 
 /* Case-insensitive char compare. */
@@ -2197,6 +2265,8 @@ static void open_dialog_route_key(jbe_state_t *s, uint16_t k) {
 void jbe_handle_key(jbe_state_t *s, uint16_t k) {
     /* The Japi Commander is fully modal and independent of the text buffer. */
     if (s->commander_active) { commander_handle_key(s, k); return; }
+    /* The F1 help window is modal too, and works with an empty buffer. */
+    if (s->help_active) { help_handle_key(s, k); return; }
     if (JBE_BUF(s)->n_lines == 0) return;
     s->open_msg[0] = 0;   /* any key dismisses the transient "could not open" notice */
 
@@ -2400,6 +2470,10 @@ void jbe_handle_key(jbe_state_t *s, uint16_t k) {
        the split isn't open; the helper clamps to keep both panes alive. */
     if (k == JAPI_KEY_CUP)   { split_resize(s, -1); return; }
     if (k == JAPI_KEY_CDOWN) { split_resize(s, +1); return; }
+
+    /* F1 opens the built-in help. Context-sensitive: in an open menu it jumps to
+       that menu (or the highlighted item); while editing it opens at the top. */
+    if (k == JAPI_KEY_F1) { help_open_context(s); return; }
 
     /* Open menu from normal mode on Alt+<accelerator>. */
     if (!s->menu_active && (k & 0xFF00) == JAPI_KEY_ALT_BASE) {
@@ -3656,6 +3730,63 @@ static void render_commander(jbe_state_t *s) {
                   VGA_BLACK, VGA_CYAN);
 }
 
+/* ---- F1 Help: a centred, framed window that floats over the editor --------
+ * 92x52 cells, centred, with a drop shadow, so the editor stays visible all
+ * around it. Content + anchors come from help_text.h (generated from the
+ * manual by tools/mkhelp.py). The id->line lookup and the scroll/open helpers
+ * live higher up (before jbe_handle_key, which calls them). */
+
+static void render_help(const jbe_state_t *s) {
+    enum { W = 92, H = 52 };
+    const int left = (VGA_COLS - W) / 2;          /* 17 */
+    const int top  = (VGA_ROWS - H) / 2;          /*  6 */
+    const uint8_t BG = VGA_BLUE, FG = VGA_WHITE, BORD = VGA_WHITE;
+    const uint8_t HEAD = VGA_YELLOW, SHADOW = 0x15;   /* dim grey */
+    const uint8_t TL=201, TR=187, BL=200, BR=188, HZ=205, VT=186;  /* double line */
+
+    /* drop shadow, offset one cell right and down, so the window floats */
+    for (int r = top + 1; r <= top + H; r++)
+        vga_set_char(r, left + W, ' ', SHADOW, SHADOW);
+    for (int c = left + 1; c <= left + W; c++)
+        vga_set_char(top + H, c, ' ', SHADOW, SHADOW);
+
+    /* interior */
+    for (int r = top; r < top + H; r++)
+        for (int c = left; c < left + W; c++)
+            vga_set_char(r, c, ' ', FG, BG);
+
+    /* double-line border */
+    vga_set_char(top,       left,     TL, BORD, BG);
+    vga_set_char(top,       left+W-1, TR, BORD, BG);
+    vga_set_char(top+H-1,   left,     BL, BORD, BG);
+    vga_set_char(top+H-1,   left+W-1, BR, BORD, BG);
+    for (int c = left+1; c < left+W-1; c++) {
+        vga_set_char(top,     c, HZ, BORD, BG);
+        vga_set_char(top+H-1, c, HZ, BORD, BG);
+    }
+    for (int r = top+1; r < top+H-1; r++) {
+        vga_set_char(r, left,     VT, BORD, BG);
+        vga_set_char(r, left+W-1, VT, BORD, BG);
+    }
+
+    /* title, centred in the top border (black on cyan) */
+    const char *title = " Help ";
+    vga_print(top, left + (W - (int)strlen(title)) / 2, title, VGA_BLACK, VGA_CYAN);
+
+    /* content */
+    const int inner_top = top + 2, inner_left = left + 3, rows = H - 4;
+    for (int i = 0; i < rows; i++) {
+        int li = s->help_top + i;
+        if (li >= HELP_NLINES) break;
+        vga_print(inner_top + i, inner_left, HELP_LINES[li].text,
+                  HELP_LINES[li].heading ? HEAD : FG, BG);
+    }
+
+    /* footer hint, centred in the bottom border */
+    const char *foot = " \030\031 PgUp/PgDn   Esc to close ";
+    vga_print(top+H-1, left + (W - (int)strlen(foot)) / 2, foot, VGA_BLACK, VGA_CYAN);
+}
+
 void jbe_render(const jbe_state_t *cs) {
     /* The pane-render helper has to flip active_pane while it runs, so we
        cast away const for that scope; active_pane is restored before the
@@ -3757,4 +3888,7 @@ void jbe_render(const jbe_state_t *cs) {
 
     /* Dropdown overlay last so it covers everything below the bar. */
     render_dropdown(s);
+
+    /* F1 Help floats on top of everything, with the editor visible around it. */
+    if (s->help_active) render_help(s);
 }

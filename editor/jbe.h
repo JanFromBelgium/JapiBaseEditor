@@ -346,6 +346,12 @@ typedef struct {
     int            commander_pane;       /* 0 = left, 1 = right */
     ui_filelist_t  commander_list[2];
     char           commander_msg[80];    /* status line: copy result / error */
+
+    /* F1 Help overlay (v2.0, in progress): a centred framed window that floats
+       over the editor so the work behind it stays visible. help_top = scroll
+       offset (first visible help line). */
+    bool           help_active;
+    int            help_top;
     /* Transient one-line notice shown on the status row (high-visibility),
        e.g. why a file could not be opened. Set by jbe_load on a failed/refused
        load (the current document is left untouched), cleared on the next key
