@@ -1385,6 +1385,7 @@ static const menu_item_t MENU_EDIT[]    = {
     {"Select All", 'A', "Ctrl+A"},
     JBE_MENU_SEP,
     {"Toggle Comment", 'G', "Ctrl+G"},
+    {"Format", 'F', 0},
     JBE_MENU_SEP,
     {"Undo",  'U', "Ctrl+Z"},
     {"Redo",  'R', "Ctrl+Y"},
@@ -2236,7 +2237,7 @@ static void menu_activate(jbe_state_t *s) {
             else if (i == 3) save_as_open(s);       /* Save As */
             else if (i == 4) close_current(s);      /* Close */
             break;
-        case 1: /* Edit (indexes 4 and 6 are separator lines) */
+        case 1: /* Edit (indexes 4 and 7 are separator lines) */
             if (i == 0) {                          /* Cut */
                 if (JBE_PANE(s)->sel_active) { clip_copy_selection(s); sel_delete(s); }
             } else if (i == 1) {                   /* Copy */
@@ -2249,9 +2250,11 @@ static void menu_activate(jbe_state_t *s) {
                 select_all(s);
             } else if (i == 5) {                   /* Toggle Comment */
                 toggle_comment(s);
-            } else if (i == 7) {                   /* Undo */
+            } else if (i == 6) {                   /* Format (Embellish) */
+                jbe_format(s);
+            } else if (i == 8) {                   /* Undo */
                 jbe_undo(s);
-            } else if (i == 8) {                   /* Redo */
+            } else if (i == 9) {                   /* Redo */
                 jbe_redo(s);
             }
             jbe_follow_cursor(s);
@@ -3452,6 +3455,264 @@ static void basic_colour_line(const jbe_syn_scheme_t *scheme,
         }
         i++;
     }
+}
+
+/* ===================================================================== *
+ *  Embellish / Format -- BASIC-aware source tidy-up (Edit -> Format).    *
+ *                                                                        *
+ *  Re-indents block structure (2 spaces / level), trims trailing
+ *  whitespace, and uppercases keyword / built-in-function tokens to their
+ *  canonical spelling. Variables, numbers, string bodies and comment
+ *  bodies are left untouched. The tokenising rules below mirror
+ *  basic_colour_line() above (comment '/REM, "..." strings, &H/&O/&B and
+ *  decimal numbers, identifiers); kept separate because the colouriser
+ *  emits colours, while the formatter needs token spans + a class. It
+ *  always uses the BASIC tables (MMBASIC_KEYWORDS / MMBASIC_FUNCTIONS),
+ *  independent of the buffer's active highlight scheme.
+ * ===================================================================== */
+
+enum { FMT_NONE = 0, FMT_OPEN, FMT_CLOSE, FMT_MID };   /* block effect of a keyword */
+
+/* The canonical (uppercase) spelling of a keyword/function span, or NULL. */
+static const char *fmt_lookup_canon(const char *line, int from, int to,
+                                    const char *const *list) {
+    if (!list) return NULL;
+    for (int i = 0; list[i]; i++)
+        if (word_match_ci(line, from, to, list[i])) return list[i];
+    return NULL;
+}
+
+/* Index just past a number token starting at i (i is '&' or a digit). */
+static int fmt_skip_number(const char *src, int len, int i) {
+    if (src[i] == '&' && i + 1 < len) {
+        unsigned char b = (unsigned char)src[i + 1];
+        if (b=='H'||b=='h'||b=='O'||b=='o'||b=='B'||b=='b') {
+            i += 2;
+            while (i < len) { unsigned char d=(unsigned char)src[i];
+                if ((d>='0'&&d<='9')||(d>='A'&&d<='F')||(d>='a'&&d<='f')) i++; else break; }
+            return i;
+        }
+        return i + 1;   /* a lone '&' */
+    }
+    while (i < len) { unsigned char d=(unsigned char)src[i];
+        if ((d>='0'&&d<='9')||d=='.'||d=='e'||d=='E') i++; else break; }
+    return i;
+}
+
+/* Skip whitespace from `from`; if an identifier follows, fill [*ps,*pe) and
+   return true. Used for two-word keyword look-ahead (END IF, SELECT CASE...). */
+static bool fmt_peek_ident(const char *src, int len, int from, int *ps, int *pe) {
+    int i = from;
+    while (i < len && (src[i]==' '||src[i]=='\t')) i++;
+    if (i >= len || !is_ident_start((unsigned char)src[i])) return false;
+    int s = i;
+    while (i < len && is_ident_cont((unsigned char)src[i])) i++;
+    *ps = s; *pe = i; return true;
+}
+
+/* Index just past a THEN keyword on/after `from` (skipping strings and other
+   tokens), or -1 if a comment/EOL comes first (no THEN). */
+static int fmt_after_then(const char *src, int len, int from) {
+    int i = from;
+    while (i < len) {
+        unsigned char c = (unsigned char)src[i];
+        if (c==' '||c=='\t') { i++; continue; }
+        if (is_comment_start(&MMBASIC_SCHEME, c)) return -1;     /* ' comment */
+        if (c=='"') { i++; while (i<len && src[i]!='"') i++; if (i<len) i++; continue; }
+        if (c=='&' || (c>='0'&&c<='9')) { i = fmt_skip_number(src, len, i); continue; }
+        if (is_ident_start(c)) {
+            int s=i; while (i<len && is_ident_cont((unsigned char)src[i])) i++;
+            if (word_match_ci(src,s,i,"REM"))  return -1;        /* comment */
+            if (word_match_ci(src,s,i,"THEN")) return i;
+            continue;
+        }
+        i++;
+    }
+    return -1;
+}
+
+/* Classify a keyword token [s,e). For two-word forms (END IF, SELECT CASE,
+   ELSE IF) and a multi-line IF, sets *consumed_end past everything consumed. */
+static int fmt_classify(const char *src, int len, int s, int e, int *consumed_end) {
+    *consumed_end = e;
+    if (word_match_ci(src,s,e,"FOR")||word_match_ci(src,s,e,"DO")||
+        word_match_ci(src,s,e,"SUB")||word_match_ci(src,s,e,"FUNCTION")||
+        word_match_ci(src,s,e,"TYPE")||word_match_ci(src,s,e,"WHILE")) return FMT_OPEN;
+    if (word_match_ci(src,s,e,"NEXT")||word_match_ci(src,s,e,"LOOP")||
+        word_match_ci(src,s,e,"WEND")||word_match_ci(src,s,e,"ENDIF")||
+        word_match_ci(src,s,e,"ENDSUB")||word_match_ci(src,s,e,"ENDFUNCTION")) return FMT_CLOSE;
+    if (word_match_ci(src,s,e,"ELSEIF")||word_match_ci(src,s,e,"CASE")) return FMT_MID;
+    if (word_match_ci(src,s,e,"ELSE")) {                         /* ELSE [IF] */
+        int ps,pe;
+        if (fmt_peek_ident(src,len,e,&ps,&pe) && word_match_ci(src,ps,pe,"IF")) *consumed_end = pe;
+        return FMT_MID;
+    }
+    if (word_match_ci(src,s,e,"SELECT")) {                       /* opener only with CASE */
+        int ps,pe;
+        if (fmt_peek_ident(src,len,e,&ps,&pe) && word_match_ci(src,ps,pe,"CASE")) {
+            *consumed_end = pe; return FMT_OPEN;
+        }
+        return FMT_NONE;
+    }
+    if (word_match_ci(src,s,e,"END")) {                          /* END <word> closes; bare END = program end */
+        int ps,pe;
+        if (fmt_peek_ident(src,len,e,&ps,&pe) &&
+            (word_match_ci(src,ps,pe,"IF")||word_match_ci(src,ps,pe,"SUB")||
+             word_match_ci(src,ps,pe,"FUNCTION")||word_match_ci(src,ps,pe,"SELECT")||
+             word_match_ci(src,ps,pe,"TYPE"))) { *consumed_end = pe; return FMT_CLOSE; }
+        return FMT_NONE;
+    }
+    if (word_match_ci(src,s,e,"IF")) {                           /* opener only if multi-line */
+        int after = fmt_after_then(src, len, e);
+        if (after < 0) return FMT_NONE;                          /* no THEN */
+        int j = after; while (j<len && (src[j]==' '||src[j]=='\t')) j++;
+        if (j >= len) return FMT_OPEN;                           /* nothing after THEN */
+        if (is_comment_start(&MMBASIC_SCHEME,(unsigned char)src[j])) return FMT_OPEN;
+        if (is_ident_start((unsigned char)src[j])) {
+            int k=j; while (k<len && is_ident_cont((unsigned char)src[k])) k++;
+            if (word_match_ci(src,j,k,"REM")) return FMT_OPEN;
+        }
+        return FMT_NONE;                                         /* statement after THEN = single-line */
+    }
+    return FMT_NONE;
+}
+
+/* Scan one line: *net = sum of opener(+1)/closer(-1) effects; *leading_dedent =
+   the first significant token is a closer or mid-block keyword. */
+static void fmt_scan_line(const char *src, int len, int *net_out, bool *leading_dedent_out) {
+    int net = 0; bool first = true, leading_dedent = false; int i = 0;
+    while (i < len) {
+        unsigned char c = (unsigned char)src[i];
+        if (c==' '||c=='\t') { i++; continue; }
+        if (is_comment_start(&MMBASIC_SCHEME, c)) break;
+        if (c=='"') { i++; while (i<len && src[i]!='"') i++; if (i<len) i++; first=false; continue; }
+        if (c=='&' || (c>='0'&&c<='9')) { i = fmt_skip_number(src,len,i); first=false; continue; }
+        if (is_ident_start(c)) {
+            int s=i; while (i<len && is_ident_cont((unsigned char)src[i])) i++;
+            if (word_match_ci(src,s,i,"REM")) break;
+            int ce, cls = fmt_classify(src, len, s, i, &ce);
+            if (first) { leading_dedent = (cls==FMT_CLOSE || cls==FMT_MID); first = false; }
+            if (cls==FMT_OPEN) net++; else if (cls==FMT_CLOSE) net--;
+            i = ce;
+            continue;
+        }
+        first = false; i++;
+    }
+    *net_out = net; *leading_dedent_out = leading_dedent;
+}
+
+/* Rebuild one line: indent_level*2 spaces, then the body with keyword/function
+   tokens uppercased to canonical and everything else verbatim, then trailing
+   whitespace trimmed. Returns the new length, or -1 if it would overflow out. */
+static int fmt_rewrite_line(const char *src, int len, int indent_level,
+                            char *out, int out_cap) {
+    int o = 0;
+    for (int k = 0; k < indent_level*2; k++) { if (o>=out_cap) return -1; out[o++]=' '; }
+    int i = 0; while (i<len && (src[i]==' '||src[i]=='\t')) i++;   /* drop old indent */
+    while (i < len) {
+        unsigned char c = (unsigned char)src[i];
+        if (is_comment_start(&MMBASIC_SCHEME, c)) {                /* ' .. : verbatim to EOL */
+            while (i<len) { if (o>=out_cap) return -1; out[o++]=src[i++]; }
+            break;
+        }
+        if (c=='"') {                                              /* string: verbatim incl quotes */
+            { if (o>=out_cap) return -1; out[o++]=src[i++]; }
+            while (i<len && src[i]!='"') { if (o>=out_cap) return -1; out[o++]=src[i++]; }
+            if (i<len) { if (o>=out_cap) return -1; out[o++]=src[i++]; }
+            continue;
+        }
+        if (c=='&' || (c>='0'&&c<='9')) {                          /* number: verbatim */
+            int e = fmt_skip_number(src, len, i);
+            while (i<e) { if (o>=out_cap) return -1; out[o++]=src[i++]; }
+            continue;
+        }
+        if (is_ident_start(c)) {
+            int s=i; while (i<len && is_ident_cont((unsigned char)src[i])) i++;
+            if (word_match_ci(src,s,i,"REM")) {                    /* canonical REM + verbatim rest */
+                const char *p="REM"; while (*p){ if(o>=out_cap)return -1; out[o++]=*p++; }
+                while (i<len){ if(o>=out_cap)return -1; out[o++]=src[i++]; }
+                break;
+            }
+            const char *can = fmt_lookup_canon(src,s,i,MMBASIC_KEYWORDS);
+            if (!can) can = fmt_lookup_canon(src,s,i,MMBASIC_FUNCTIONS);
+            if (can) { for (const char *p=can; *p; p++){ if(o>=out_cap)return -1; out[o++]=*p; } }
+            else     { for (int k=s; k<i; k++){ if(o>=out_cap)return -1; out[o++]=src[k]; } }
+            continue;
+        }
+        { if (o>=out_cap) return -1; out[o++]=src[i++]; }          /* operator/other: verbatim */
+    }
+    while (o>0 && (out[o-1]==' '||out[o-1]=='\t')) o--;            /* trim trailing */
+    return o;
+}
+
+/* Embellish the active pane: re-indent + uppercase keywords + trim trailing
+   whitespace, over the selection (whole lines) or the whole file. Done as one
+   stream DELETE of the old region + one stream INSERT of the rebuilt region, so
+   it integrates with undo/redo (a full undo is two Ctrl+Z steps). Aborts without
+   changing anything if the rebuilt text won't fit or an allocation fails. */
+void jbe_format(jbe_state_t *s) {
+    jbe_buffer_t *b = JBE_BUF(s);
+    if (b->n_lines == 0) return;
+
+    int r1, r2;
+    if (JBE_PANE(s)->sel_active) {
+        int c1, c2;
+        if (JBE_PANE(s)->sel_block) sel_range_block(s, &r1, &c1, &r2, &c2);
+        else                        sel_range(s, &r1, &c1, &r2, &c2);
+    } else { r1 = 0; r2 = b->n_lines - 1; }
+    if (r1 < 0) r1 = 0;
+    if (r2 > b->n_lines - 1) r2 = b->n_lines - 1;
+    if (r2 < r1) return;
+
+    /* Entry indent level = the block depth of the lines above the region. */
+    int level = 0;
+    for (int r = 0; r < r1; r++) {
+        int net; bool dd; fmt_scan_line(b->lines[r], b->len[r], &net, &dd);
+        level += net; if (level < 0) level = 0;
+    }
+
+    /* Capture the old region ('\n'-joined) -- this becomes the DELETE payload. */
+    int old_len = 0;
+    for (int r = r1; r <= r2; r++) old_len += b->len[r] + (r < r2 ? 1 : 0);
+    char *old_text = malloc(old_len ? (size_t)old_len : 1);
+    if (!old_text) return;
+    { int o = 0; for (int r = r1; r <= r2; r++) {
+        memcpy(old_text + o, b->lines[r], b->len[r]); o += b->len[r];
+        if (r < r2) old_text[o++] = '\n'; } }
+
+    /* Build the reformatted region. Generous cap (indent growth + separators). */
+    int cap = old_len + (r2 - r1 + 1) * 64 + 256;
+    char *new_text = malloc((size_t)cap);
+    if (!new_text) { free(old_text); return; }
+    int nlen = 0, lvl = level;
+    for (int r = r1; r <= r2; r++) {
+        int net; bool dd; fmt_scan_line(b->lines[r], b->len[r], &net, &dd);
+        int indent = lvl - (dd ? 1 : 0); if (indent < 0) indent = 0;
+        int n = fmt_rewrite_line(b->lines[r], b->len[r], indent, new_text + nlen, cap - nlen - 1);
+        if (n < 0) { free(old_text); free(new_text); return; }   /* overflow: leave file untouched */
+        nlen += n;
+        if (r < r2) new_text[nlen++] = '\n';
+        lvl += net; if (lvl < 0) lvl = 0;
+    }
+
+    /* Nothing actually changed -> don't dirty the file or push undo records. */
+    if (nlen == old_len && memcmp(old_text, new_text, (size_t)nlen) == 0) {
+        free(old_text); free(new_text); return;
+    }
+
+    int cur_r = JBE_PANE(s)->cur_row, cur_c = JBE_PANE(s)->cur_col;
+    int er, ec;
+    apply_stream_delete(s, r1, 0, old_text, old_len);
+    undo_push(s, JBE_UNDO_DELETE, r1, 0, old_text, old_len, cur_r, cur_c, false);
+    apply_stream_insert(s, r1, 0, new_text, nlen, &er, &ec);
+    undo_push(s, JBE_UNDO_INSERT, r1, 0, new_text, nlen, r1, 0, false);
+
+    /* Land the cursor at the first non-space of the first formatted line. */
+    JBE_PANE(s)->sel_active = false;
+    JBE_PANE(s)->cur_row = r1;
+    { int c = 0; while (c < b->len[r1] && (b->lines[r1][c]==' ' || b->lines[r1][c]=='\t')) c++;
+      JBE_PANE(s)->cur_col = c; }
+    jbe_follow_cursor(s);
 }
 
 /* Drive the per-line colour fill from the active scheme. Returns false if

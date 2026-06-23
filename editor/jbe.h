@@ -468,4 +468,9 @@ bool jbe_bracket_match(jbe_state_t *s, int row, int col, int *mrow, int *mcol);
 void jbe_undo(jbe_state_t *s);
 void jbe_redo(jbe_state_t *s);
 
+/* Embellish/Format the active pane: re-indent (2 spaces/level), uppercase
+   keyword + built-in-function tokens, trim trailing whitespace. Acts on the
+   selection (whole lines) or the whole file. Edit -> Format. */
+void jbe_format(jbe_state_t *s);
+
 #endif

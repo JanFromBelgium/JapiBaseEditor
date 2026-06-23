@@ -1992,6 +1992,50 @@ int main(void) {
         }
     }
 
+    /* --- 23. Embellish / Format (jbe_format) ---------------------------- */
+    {
+        const char *MESS =
+            "for i=1 to 3\n"
+            "if i>1 then\n"
+            "print \"for next\"\n"
+            "endif\n"
+            "next\n";
+        CHECK(make_fixture("A:fmt_t.txt", MESS), "write format fixture");
+        jbe_state_t f;
+        jbe_init(&f);
+        CHECK(jbe_load(&f, "A:fmt_t.txt"), "load format fixture");
+        CHECK(JBE_BUF(&f)->n_lines == 5, "format: 5 lines parsed");
+
+        /* Snapshot the original lines for the undo round-trip check. */
+        char orig[5][64]; int orig_n = JBE_BUF(&f)->n_lines;
+        for (int r = 0; r < orig_n && r < 5; r++)
+            snprintf(orig[r], sizeof orig[r], "%s", JBE_BUF(&f)->lines[r]);
+
+        jbe_format(&f);
+
+        /* Re-indented (2 spaces/level), keywords uppercased, string untouched. */
+        const char *want[5] = {
+            "FOR i=1 TO 3",
+            "  IF i>1 THEN",
+            "    PRINT \"for next\"",
+            "  ENDIF",
+            "NEXT",
+        };
+        CHECK(JBE_BUF(&f)->n_lines == 5, "format: line count preserved");
+        for (int r = 0; r < 5; r++)
+            CHECK(strcmp(JBE_BUF(&f)->lines[r], want[r]) == 0, "format: line matches expected");
+
+        /* Two undos restore the original byte-for-byte (delete + insert step). */
+        jbe_undo(&f);
+        jbe_undo(&f);
+        CHECK(JBE_BUF(&f)->n_lines == orig_n, "format undo: line count restored");
+        for (int r = 0; r < orig_n && r < 5; r++)
+            CHECK(strcmp(JBE_BUF(&f)->lines[r], orig[r]) == 0, "format undo: line restored");
+
+        jbe_free(&f);
+        japi_remove("A:fmt_t.txt");
+    }
+
     if (fails == 0) { printf("PASS: JBE MVP step 1..5c + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 (shortcuts+macro-menu) + tab-indent + auto-indent + goto-line + bracket-match + file(saveas/close/delete) + 21 (F1 help) + 22 (commander ops)\n"); return 0; }
     printf("%d check(s) failed\n", fails);
     return 1;
